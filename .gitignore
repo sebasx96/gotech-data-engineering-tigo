@@ -30,5 +30,8 @@ Thumbs.db
 # Docker
 *.pid
 
-# Raw source data
-data/raw/*
+# Data
+data/raw/
+data/bronze/
+data/silver/
+data/gold/
