@@ -704,6 +704,230 @@ def validate_invoice_financial(
     return results
 
 
+
+def build_product_sales_from_frames(
+    invoice_items: pd.DataFrame,
+    invoices: pd.DataFrame,
+    products: pd.DataFrame,
+    customers: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build one analytical row per invoice item."""
+
+    invoice_details = invoices[
+        [
+            "invoice_id",
+            "customer_id",
+            "issued_at",
+            "status",
+            "currency",
+        ]
+    ].rename(
+        columns={"status": "invoice_status"}
+    )
+
+    product_details = products[
+        [
+            "product_id",
+            "sku",
+            "name",
+            "category",
+            "monthly_price",
+            "active",
+        ]
+    ].rename(
+        columns={
+            "name": "product_name",
+            "category": "product_category",
+            "monthly_price": "product_monthly_price",
+            "active": "product_active",
+        }
+    )
+
+    customer_details = customers[
+        [
+            "customer_id",
+            "external_ref",
+            "segment",
+            "country",
+        ]
+    ].rename(
+        columns={
+            "external_ref": "student_id",
+            "segment": "customer_segment",
+            "country": "customer_country",
+        }
+    )
+
+    product_sales = (
+        invoice_items
+        .merge(
+            invoice_details,
+            on="invoice_id",
+            how="left",
+            validate="many_to_one",
+        )
+        .merge(
+            product_details,
+            on="product_id",
+            how="left",
+            validate="many_to_one",
+        )
+        .merge(
+            customer_details,
+            on="customer_id",
+            how="left",
+            validate="many_to_one",
+        )
+    )
+
+    product_sales["is_student_customer"] = (
+        product_sales["student_id"].notna()
+    )
+
+    monetary_columns = [
+        "unit_price",
+        "line_total",
+        "product_monthly_price",
+    ]
+
+    product_sales[monetary_columns] = (
+        product_sales[monetary_columns].round(2)
+    )
+
+    selected_columns = [
+        "invoice_item_id",
+        "invoice_id",
+        "customer_id",
+        "student_id",
+        "is_student_customer",
+        "customer_segment",
+        "customer_country",
+        "product_id",
+        "sku",
+        "product_name",
+        "product_category",
+        "product_monthly_price",
+        "product_active",
+        "issued_at",
+        "invoice_status",
+        "currency",
+        "quantity",
+        "unit_price",
+        "line_total",
+    ]
+
+    return product_sales[selected_columns].copy()
+
+
+def build_product_sales(
+    silver_root: Path = SILVER_ROOT,
+) -> pd.DataFrame:
+    """Read Silver inputs and build Gold product sales."""
+
+    return build_product_sales_from_frames(
+        invoice_items=read_silver_table(
+            "billing", "invoice_items", silver_root
+        ),
+        invoices=read_silver_table(
+            "billing", "invoices", silver_root
+        ),
+        products=read_silver_table(
+            "billing", "products", silver_root
+        ),
+        customers=read_silver_table(
+            "billing", "customers", silver_root
+        ),
+    )
+
+
+def validate_product_sales(
+    dataframe: pd.DataFrame,
+    expected_rows: int,
+) -> dict[str, int | bool]:
+    """Validate product-sales grain, joins and line calculations."""
+
+    expected_line_total = (
+        dataframe["quantity"]
+        * dataframe["unit_price"]
+    ).round(2)
+
+    results: dict[str, int | bool] = {
+        "actual_rows": len(dataframe),
+        "expected_rows": expected_rows,
+        "null_invoice_item_ids": int(
+            dataframe["invoice_item_id"].isna().sum()
+        ),
+        "duplicated_invoice_item_ids": int(
+            dataframe["invoice_item_id"].duplicated().sum()
+        ),
+        "missing_invoices": int(
+            dataframe["issued_at"].isna().sum()
+        ),
+        "missing_customers": int(
+            dataframe["customer_segment"].isna().sum()
+        ),
+        "missing_products": int(
+            dataframe["sku"].isna().sum()
+        ),
+        "missing_currencies": int(
+            dataframe["currency"].isna().sum()
+        ),
+        "non_positive_quantities": int(
+            dataframe["quantity"].le(0).sum()
+        ),
+        "negative_unit_prices": int(
+            dataframe["unit_price"].lt(0).sum()
+        ),
+        "negative_line_totals": int(
+            dataframe["line_total"].lt(0).sum()
+        ),
+        "invalid_line_calculations": int(
+            dataframe["line_total"]
+            .sub(expected_line_total)
+            .abs()
+            .gt(MONETARY_TOLERANCE)
+            .sum()
+        ),
+        "student_sales_lines": int(
+            dataframe["is_student_customer"].sum()
+        ),
+        "non_student_sales_lines": int(
+            (~dataframe["is_student_customer"]).sum()
+        ),
+        "currency_count": int(
+            dataframe["currency"].nunique()
+        ),
+        "product_category_count": int(
+            dataframe["product_category"].nunique()
+        ),
+    }
+
+    results["is_valid"] = all(
+        [
+            results["actual_rows"] == results["expected_rows"],
+            results["null_invoice_item_ids"] == 0,
+            results["duplicated_invoice_item_ids"] == 0,
+            results["missing_invoices"] == 0,
+            results["missing_customers"] == 0,
+            results["missing_products"] == 0,
+            results["missing_currencies"] == 0,
+            results["non_positive_quantities"] == 0,
+            results["negative_unit_prices"] == 0,
+            results["negative_line_totals"] == 0,
+            results["invalid_line_calculations"] == 0,
+        ]
+    )
+
+    for rule_name, value in results.items():
+        print(f"{rule_name}: {value}")
+
+    if not results["is_valid"]:
+        raise ValueError(
+            "Gold product_sales validation failed."
+        )
+
+    return results
+
 def ensure_gold_schema(engine: Engine) -> None:
     """Create the Gold schema when it does not already exist."""
 
@@ -922,6 +1146,64 @@ def run_invoice_financial(engine: Engine) -> None:
     print(f"Parquet export: {parquet_path}")
 
 
+
+def run_product_sales(engine: Engine) -> None:
+    """Build, validate, load and export product sales."""
+
+    table_name = "product_sales"
+    primary_key = "invoice_item_id"
+
+    print("\n" + "=" * 70)
+    print("BUILDING GOLD.PRODUCT_SALES")
+    print("=" * 70)
+
+    expected_rows = len(
+        read_silver_table("billing", "invoice_items")
+    )
+    dataframe = build_product_sales()
+
+    print("\n" + "=" * 70)
+    print("VALIDATING GOLD.PRODUCT_SALES DATAFRAME")
+    print("=" * 70)
+
+    validate_product_sales(
+        dataframe,
+        expected_rows,
+    )
+
+    print("\n" + "=" * 70)
+    print("LOADING GOLD.PRODUCT_SALES INTO POSTGRESQL")
+    print("=" * 70)
+
+    load_gold_table(
+        dataframe=dataframe,
+        engine=engine,
+        table_name=table_name,
+        primary_key=primary_key,
+    )
+
+    print("\n" + "=" * 70)
+    print("VALIDATING POSTGRESQL TABLE")
+    print("=" * 70)
+
+    validate_loaded_table(
+        engine=engine,
+        table_name=table_name,
+        primary_key=primary_key,
+        expected_rows=expected_rows,
+    )
+
+    parquet_path = export_gold_parquet(
+        dataframe,
+        table_name,
+    )
+
+    print("\n" + "=" * 70)
+    print("GOLD.PRODUCT_SALES COMPLETED SUCCESSFULLY")
+    print("=" * 70)
+    print(f"PostgreSQL table: {GOLD_SCHEMA}.{table_name}")
+    print(f"Parquet export: {parquet_path}")
+
 def main() -> None:
     """Build, validate, load and export all implemented Gold tables."""
 
@@ -929,6 +1211,7 @@ def main() -> None:
 
     run_academic_performance(engine)
     run_invoice_financial(engine)
+    run_product_sales(engine)
 
     print("\n" + "=" * 70)
     print("GOLD PIPELINE COMPLETED SUCCESSFULLY")
