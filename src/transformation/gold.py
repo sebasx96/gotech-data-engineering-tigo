@@ -1593,6 +1593,246 @@ def validate_crm_opportunity(
 
     return results
 
+def build_crm_lead_from_frames(
+    leads: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build one analytical row per CRM lead."""
+
+    crm_lead = leads.rename(
+        columns={
+            "source": "lead_source",
+            "status": "lead_status",
+            "score": "lead_score",
+        }
+    ).copy()
+
+    crm_lead["lead_name"] = (
+        crm_lead["first_name"].astype("string")
+        + " "
+        + crm_lead["last_name"].astype("string")
+    )
+
+    crm_lead["is_new"] = (
+        crm_lead["lead_status"].eq("new")
+    )
+    crm_lead["is_contacted"] = (
+        crm_lead["lead_status"].eq("contacted")
+    )
+    crm_lead["is_qualified"] = (
+        crm_lead["lead_status"].eq("qualified")
+    )
+    crm_lead["is_converted"] = (
+        crm_lead["lead_status"].eq("converted")
+    )
+    crm_lead["is_lost"] = (
+        crm_lead["lead_status"].eq("lost")
+    )
+    crm_lead["is_open"] = (
+        crm_lead["lead_status"].isin(
+            ["new", "contacted", "qualified"]
+        )
+    )
+    crm_lead["is_closed"] = (
+        crm_lead["lead_status"].isin(
+            ["converted", "lost"]
+        )
+    )
+
+    selected_columns = [
+        "lead_id",
+        "first_name",
+        "last_name",
+        "lead_name",
+        "email",
+        "lead_source",
+        "lead_status",
+        "lead_score",
+        "created_at",
+        "is_new",
+        "is_contacted",
+        "is_qualified",
+        "is_converted",
+        "is_lost",
+        "is_open",
+        "is_closed",
+    ]
+
+    return crm_lead[selected_columns].copy()
+
+
+def build_crm_lead(
+    silver_root: Path = SILVER_ROOT,
+) -> pd.DataFrame:
+    """Read Silver input and build Gold CRM leads."""
+
+    return build_crm_lead_from_frames(
+        leads=read_silver_table(
+            "crm", "leads", silver_root
+        ),
+    )
+
+
+def validate_crm_lead(
+    dataframe: pd.DataFrame,
+    expected_rows: int,
+) -> dict[str, int | bool | float]:
+    """Validate CRM-lead grain, score range and status flags."""
+
+    expected_new_flag = dataframe["lead_status"].eq("new")
+    expected_contacted_flag = dataframe["lead_status"].eq(
+        "contacted"
+    )
+    expected_qualified_flag = dataframe["lead_status"].eq(
+        "qualified"
+    )
+    expected_converted_flag = dataframe["lead_status"].eq(
+        "converted"
+    )
+    expected_lost_flag = dataframe["lead_status"].eq("lost")
+    expected_open_flag = dataframe["lead_status"].isin(
+        ["new", "contacted", "qualified"]
+    )
+    expected_closed_flag = dataframe["lead_status"].isin(
+        ["converted", "lost"]
+    )
+
+    status_flag_total = dataframe[
+        [
+            "is_new",
+            "is_contacted",
+            "is_qualified",
+            "is_converted",
+            "is_lost",
+        ]
+    ].sum(axis=1)
+
+    converted_leads = int(dataframe["is_converted"].sum())
+    total_leads = len(dataframe)
+
+    results: dict[str, int | bool | float] = {
+        "actual_rows": total_leads,
+        "expected_rows": expected_rows,
+        "null_lead_ids": int(
+            dataframe["lead_id"].isna().sum()
+        ),
+        "duplicated_lead_ids": int(
+            dataframe["lead_id"].duplicated().sum()
+        ),
+        "missing_sources": int(
+            dataframe["lead_source"].isna().sum()
+        ),
+        "missing_statuses": int(
+            dataframe["lead_status"].isna().sum()
+        ),
+        "missing_scores": int(
+            dataframe["lead_score"].isna().sum()
+        ),
+        "missing_created_dates": int(
+            dataframe["created_at"].isna().sum()
+        ),
+        "invalid_scores": int(
+            (
+                ~dataframe["lead_score"].between(0, 100)
+            ).sum()
+        ),
+        "invalid_new_flags": int(
+            dataframe["is_new"].ne(expected_new_flag).sum()
+        ),
+        "invalid_contacted_flags": int(
+            dataframe["is_contacted"]
+            .ne(expected_contacted_flag)
+            .sum()
+        ),
+        "invalid_qualified_flags": int(
+            dataframe["is_qualified"]
+            .ne(expected_qualified_flag)
+            .sum()
+        ),
+        "invalid_converted_flags": int(
+            dataframe["is_converted"]
+            .ne(expected_converted_flag)
+            .sum()
+        ),
+        "invalid_lost_flags": int(
+            dataframe["is_lost"].ne(expected_lost_flag).sum()
+        ),
+        "invalid_open_flags": int(
+            dataframe["is_open"].ne(expected_open_flag).sum()
+        ),
+        "invalid_closed_flags": int(
+            dataframe["is_closed"].ne(expected_closed_flag).sum()
+        ),
+        "invalid_status_flag_totals": int(
+            status_flag_total.ne(1).sum()
+        ),
+        "contradictory_open_closed_flags": int(
+            (
+                dataframe["is_open"]
+                & dataframe["is_closed"]
+            ).sum()
+        ),
+        "new_leads": int(dataframe["is_new"].sum()),
+        "contacted_leads": int(
+            dataframe["is_contacted"].sum()
+        ),
+        "qualified_leads": int(
+            dataframe["is_qualified"].sum()
+        ),
+        "converted_leads": converted_leads,
+        "lost_leads": int(dataframe["is_lost"].sum()),
+        "open_leads": int(dataframe["is_open"].sum()),
+        "closed_leads": int(dataframe["is_closed"].sum()),
+        "lead_source_count": int(
+            dataframe["lead_source"].nunique()
+        ),
+        "average_lead_score": round(
+            float(dataframe["lead_score"].mean()),
+            2,
+        ),
+        "lead_conversion_rate": round(
+            converted_leads / total_leads,
+            4,
+        ),
+    }
+
+    blocking_rules = [
+        "actual_rows",
+        "null_lead_ids",
+        "duplicated_lead_ids",
+        "missing_sources",
+        "missing_statuses",
+        "missing_scores",
+        "missing_created_dates",
+        "invalid_scores",
+        "invalid_new_flags",
+        "invalid_contacted_flags",
+        "invalid_qualified_flags",
+        "invalid_converted_flags",
+        "invalid_lost_flags",
+        "invalid_open_flags",
+        "invalid_closed_flags",
+        "invalid_status_flag_totals",
+        "contradictory_open_closed_flags",
+    ]
+
+    results["is_valid"] = (
+        results["actual_rows"] == results["expected_rows"]
+        and all(
+            results[rule_name] == 0
+            for rule_name in blocking_rules[1:]
+        )
+    )
+
+    for rule_name, value in results.items():
+        print(f"{rule_name}: {value}")
+
+    if not results["is_valid"]:
+        raise ValueError(
+            "Gold crm_lead validation failed."
+        )
+
+    return results
+
 def ensure_gold_schema(engine: Engine) -> None:
     """Create the Gold schema when it does not already exist."""
 
@@ -1985,6 +2225,63 @@ def run_crm_opportunity(engine: Engine) -> None:
     print(f"PostgreSQL table: {GOLD_SCHEMA}.{table_name}")
     print(f"Parquet export: {parquet_path}")
 
+def run_crm_lead(engine: Engine) -> None:
+    """Build, validate, load and export CRM leads."""
+
+    table_name = "crm_lead"
+    primary_key = "lead_id"
+
+    print("\n" + "=" * 70)
+    print("BUILDING GOLD.CRM_LEAD")
+    print("=" * 70)
+
+    expected_rows = len(
+        read_silver_table("crm", "leads")
+    )
+    dataframe = build_crm_lead()
+
+    print("\n" + "=" * 70)
+    print("VALIDATING GOLD.CRM_LEAD DATAFRAME")
+    print("=" * 70)
+
+    validate_crm_lead(
+        dataframe,
+        expected_rows,
+    )
+
+    print("\n" + "=" * 70)
+    print("LOADING GOLD.CRM_LEAD INTO POSTGRESQL")
+    print("=" * 70)
+
+    load_gold_table(
+        dataframe=dataframe,
+        engine=engine,
+        table_name=table_name,
+        primary_key=primary_key,
+    )
+
+    print("\n" + "=" * 70)
+    print("VALIDATING POSTGRESQL TABLE")
+    print("=" * 70)
+
+    validate_loaded_table(
+        engine=engine,
+        table_name=table_name,
+        primary_key=primary_key,
+        expected_rows=expected_rows,
+    )
+
+    parquet_path = export_gold_parquet(
+        dataframe,
+        table_name,
+    )
+
+    print("\n" + "=" * 70)
+    print("GOLD.CRM_LEAD COMPLETED SUCCESSFULLY")
+    print("=" * 70)
+    print(f"PostgreSQL table: {GOLD_SCHEMA}.{table_name}")
+    print(f"Parquet export: {parquet_path}")
+
 def main() -> None:
     """Build, validate, load and export all implemented Gold tables."""
 
@@ -1995,6 +2292,7 @@ def main() -> None:
     run_product_sales(engine)
     run_subscription_portfolio(engine)
     run_crm_opportunity(engine)
+    run_crm_lead(engine)
 
     print("\n" + "=" * 70)
     print("GOLD PIPELINE COMPLETED SUCCESSFULLY")
