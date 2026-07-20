@@ -13,6 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SILVER_ROOT = PROJECT_ROOT / "data" / "silver"
 GOLD_ROOT = PROJECT_ROOT / "data" / "gold"
 GOLD_SCHEMA = "gold"
+MONETARY_TOLERANCE = 0.01
 
 
 def read_silver_table(
@@ -330,6 +331,379 @@ def validate_academic_performance(
     return results
 
 
+def build_invoice_item_aggregates(
+    invoice_items: pd.DataFrame,
+) -> pd.DataFrame:
+    """Aggregate invoice-line metrics by invoice."""
+
+    aggregates = (
+        invoice_items.groupby("invoice_id", as_index=False)
+        .agg(
+            invoice_item_count=("invoice_item_id", "count"),
+            invoice_item_total=("line_total", "sum"),
+        )
+    )
+
+    aggregates["invoice_item_total"] = (
+        aggregates["invoice_item_total"].round(2)
+    )
+
+    return aggregates
+
+
+def build_payment_aggregates(
+    payments: pd.DataFrame,
+) -> pd.DataFrame:
+    """Aggregate payment metrics by invoice."""
+
+    aggregates = (
+        payments.groupby("invoice_id", as_index=False)
+        .agg(
+            payment_count=("payment_id", "count"),
+            paid_amount=("amount", "sum"),
+            first_payment_at=("paid_at", "min"),
+            last_payment_at=("paid_at", "max"),
+        )
+    )
+
+    aggregates["paid_amount"] = (
+        aggregates["paid_amount"].round(2)
+    )
+
+    return aggregates
+
+
+def build_invoice_financial_from_frames(
+    invoices: pd.DataFrame,
+    invoice_items: pd.DataFrame,
+    payments: pd.DataFrame,
+    customers: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build one analytical row per invoice."""
+
+    item_aggregates = build_invoice_item_aggregates(
+        invoice_items
+    )
+    payment_aggregates = build_payment_aggregates(
+        payments
+    )
+
+    customer_details = customers[
+        [
+            "customer_id",
+            "external_ref",
+            "segment",
+            "country",
+        ]
+    ].rename(
+        columns={
+            "external_ref": "student_id",
+            "segment": "customer_segment",
+            "country": "customer_country",
+        }
+    )
+
+    invoice_financial = (
+        invoices
+        .merge(
+            customer_details,
+            on="customer_id",
+            how="left",
+            validate="many_to_one",
+        )
+        .merge(
+            item_aggregates,
+            on="invoice_id",
+            how="left",
+            validate="one_to_one",
+        )
+        .merge(
+            payment_aggregates,
+            on="invoice_id",
+            how="left",
+            validate="one_to_one",
+        )
+        .rename(
+            columns={
+                "status": "invoice_status",
+                "total": "invoice_total",
+            }
+        )
+    )
+
+    invoice_financial["invoice_item_count"] = (
+        invoice_financial["invoice_item_count"]
+        .fillna(0)
+        .astype("int64")
+    )
+    invoice_financial["invoice_item_total"] = (
+        invoice_financial["invoice_item_total"]
+        .fillna(0.0)
+        .round(2)
+    )
+    invoice_financial["payment_count"] = (
+        invoice_financial["payment_count"]
+        .fillna(0)
+        .astype("int64")
+    )
+    invoice_financial["paid_amount"] = (
+        invoice_financial["paid_amount"]
+        .fillna(0.0)
+        .round(2)
+    )
+
+    invoice_financial["invoice_total"] = (
+        invoice_financial["invoice_total"].round(2)
+    )
+
+    invoice_financial["invoice_item_difference"] = (
+        invoice_financial["invoice_item_total"]
+        - invoice_financial["invoice_total"]
+    ).round(2)
+
+    invoice_financial["balance_amount"] = (
+        invoice_financial["invoice_total"]
+        - invoice_financial["paid_amount"]
+    ).round(2)
+
+    invoice_financial["outstanding_amount"] = (
+        invoice_financial["balance_amount"]
+        .clip(lower=0)
+        .round(2)
+    )
+
+    invoice_financial["overpayment_amount"] = (
+        -invoice_financial["balance_amount"]
+    ).clip(lower=0).round(2)
+
+    invoice_financial["has_invoice_items"] = (
+        invoice_financial["invoice_item_count"] > 0
+    )
+    invoice_financial["has_payments"] = (
+        invoice_financial["payment_count"] > 0
+    )
+    invoice_financial["is_student_customer"] = (
+        invoice_financial["student_id"].notna()
+    )
+
+    invoice_financial["invoice_items_match_header"] = (
+        invoice_financial["has_invoice_items"]
+        & invoice_financial["invoice_item_difference"]
+        .abs()
+        .le(MONETARY_TOLERANCE)
+    )
+
+    invoice_financial["is_balanced"] = (
+        invoice_financial["balance_amount"]
+        .abs()
+        .le(MONETARY_TOLERANCE)
+    )
+    invoice_financial["is_outstanding"] = (
+        invoice_financial["outstanding_amount"]
+        .gt(MONETARY_TOLERANCE)
+    )
+    invoice_financial["is_overpaid"] = (
+        invoice_financial["overpayment_amount"]
+        .gt(MONETARY_TOLERANCE)
+    )
+
+    paid_status = invoice_financial["invoice_status"].eq(
+        "paid"
+    )
+    open_status = invoice_financial["invoice_status"].isin(
+        ["pending", "overdue"]
+    )
+
+    invoice_financial["payment_status_matches_balance"] = (
+        (paid_status & ~invoice_financial["is_outstanding"])
+        | (open_status & invoice_financial["is_outstanding"])
+    )
+
+    selected_columns = [
+        "invoice_id",
+        "customer_id",
+        "student_id",
+        "customer_segment",
+        "customer_country",
+        "issued_at",
+        "due_at",
+        "invoice_status",
+        "currency",
+        "invoice_total",
+        "invoice_item_count",
+        "invoice_item_total",
+        "invoice_item_difference",
+        "payment_count",
+        "paid_amount",
+        "first_payment_at",
+        "last_payment_at",
+        "balance_amount",
+        "outstanding_amount",
+        "overpayment_amount",
+        "has_invoice_items",
+        "has_payments",
+        "is_student_customer",
+        "invoice_items_match_header",
+        "is_balanced",
+        "is_outstanding",
+        "is_overpaid",
+        "payment_status_matches_balance",
+    ]
+
+    return invoice_financial[selected_columns].copy()
+
+
+def build_invoice_financial(
+    silver_root: Path = SILVER_ROOT,
+) -> pd.DataFrame:
+    """Read Silver inputs and build Gold invoice financial."""
+
+    return build_invoice_financial_from_frames(
+        invoices=read_silver_table(
+            "billing", "invoices", silver_root
+        ),
+        invoice_items=read_silver_table(
+            "billing", "invoice_items", silver_root
+        ),
+        payments=read_silver_table(
+            "billing", "payments", silver_root
+        ),
+        customers=read_silver_table(
+            "billing", "customers", silver_root
+        ),
+    )
+
+
+def validate_invoice_financial(
+    dataframe: pd.DataFrame,
+    expected_rows: int,
+) -> dict[str, int | bool]:
+    """Validate invoice grain, relationships and financial calculations."""
+
+    expected_balance = (
+        dataframe["invoice_total"]
+        - dataframe["paid_amount"]
+    ).round(2)
+
+    expected_split_balance = (
+        dataframe["outstanding_amount"]
+        - dataframe["overpayment_amount"]
+    ).round(2)
+
+    results: dict[str, int | bool] = {
+        "actual_rows": len(dataframe),
+        "expected_rows": expected_rows,
+        "null_invoice_ids": int(
+            dataframe["invoice_id"].isna().sum()
+        ),
+        "duplicated_invoice_ids": int(
+            dataframe["invoice_id"].duplicated().sum()
+        ),
+        "missing_customers": int(
+            dataframe["customer_segment"].isna().sum()
+        ),
+        "missing_currencies": int(
+            dataframe["currency"].isna().sum()
+        ),
+        "negative_invoice_totals": int(
+            dataframe["invoice_total"].lt(0).sum()
+        ),
+        "negative_invoice_item_totals": int(
+            dataframe["invoice_item_total"].lt(0).sum()
+        ),
+        "negative_paid_amounts": int(
+            dataframe["paid_amount"].lt(0).sum()
+        ),
+        "invalid_balance_calculations": int(
+            dataframe["balance_amount"]
+            .sub(expected_balance)
+            .abs()
+            .gt(MONETARY_TOLERANCE)
+            .sum()
+        ),
+        "invalid_balance_splits": int(
+            expected_split_balance
+            .sub(dataframe["balance_amount"])
+            .abs()
+            .gt(MONETARY_TOLERANCE)
+            .sum()
+        ),
+        "contradictory_balance_flags": int(
+            (
+                dataframe["is_outstanding"]
+                & dataframe["is_overpaid"]
+            ).sum()
+        ),
+        "invalid_item_flags": int(
+            (
+                dataframe["has_invoice_items"]
+                != dataframe["invoice_item_count"].gt(0)
+            ).sum()
+        ),
+        "invalid_payment_flags": int(
+            (
+                dataframe["has_payments"]
+                != dataframe["payment_count"].gt(0)
+            ).sum()
+        ),
+        "student_invoices": int(
+            dataframe["is_student_customer"].sum()
+        ),
+        "invoices_without_items": int(
+            (~dataframe["has_invoice_items"]).sum()
+        ),
+        "invoices_without_payments": int(
+            (~dataframe["has_payments"]).sum()
+        ),
+        "invoice_item_mismatches": int(
+            (
+                dataframe["has_invoice_items"]
+                & ~dataframe["invoice_items_match_header"]
+            ).sum()
+        ),
+        "balanced_invoices": int(
+            dataframe["is_balanced"].sum()
+        ),
+        "outstanding_invoices": int(
+            dataframe["is_outstanding"].sum()
+        ),
+        "overpaid_invoices": int(
+            dataframe["is_overpaid"].sum()
+        ),
+        "status_balance_mismatches": int(
+            (~dataframe["payment_status_matches_balance"]).sum()
+        ),
+    }
+
+    results["is_valid"] = all(
+        [
+            results["actual_rows"] == results["expected_rows"],
+            results["null_invoice_ids"] == 0,
+            results["duplicated_invoice_ids"] == 0,
+            results["missing_customers"] == 0,
+            results["missing_currencies"] == 0,
+            results["negative_invoice_totals"] == 0,
+            results["negative_invoice_item_totals"] == 0,
+            results["negative_paid_amounts"] == 0,
+            results["invalid_balance_calculations"] == 0,
+            results["invalid_balance_splits"] == 0,
+            results["contradictory_balance_flags"] == 0,
+            results["invalid_item_flags"] == 0,
+            results["invalid_payment_flags"] == 0,
+        ]
+    )
+
+    for rule_name, value in results.items():
+        print(f"{rule_name}: {value}")
+
+    if not results["is_valid"]:
+        raise ValueError(
+            "Gold invoice_financial validation failed."
+        )
+
+    return results
+
+
 def ensure_gold_schema(engine: Engine) -> None:
     """Create the Gold schema when it does not already exist."""
 
@@ -432,7 +806,7 @@ def export_gold_parquet(
     return output_path
 
 
-def main() -> None:
+def run_academic_performance(engine: Engine) -> None:
     """Build, validate, load and export academic performance."""
 
     table_name = "academic_performance"
@@ -445,24 +819,23 @@ def main() -> None:
     expected_rows = len(
         read_silver_table("university", "enrollments")
     )
-    academic_performance = build_academic_performance()
+    dataframe = build_academic_performance()
 
     print("\n" + "=" * 70)
-    print("VALIDATING GOLD DATAFRAME")
+    print("VALIDATING GOLD.ACADEMIC_PERFORMANCE DATAFRAME")
     print("=" * 70)
 
     validate_academic_performance(
-        academic_performance,
+        dataframe,
         expected_rows,
     )
 
     print("\n" + "=" * 70)
-    print("LOADING GOLD TABLE INTO POSTGRESQL")
+    print("LOADING GOLD.ACADEMIC_PERFORMANCE INTO POSTGRESQL")
     print("=" * 70)
 
-    engine = get_postgres_engine()
     load_gold_table(
-        dataframe=academic_performance,
+        dataframe=dataframe,
         engine=engine,
         table_name=table_name,
         primary_key=primary_key,
@@ -480,15 +853,86 @@ def main() -> None:
     )
 
     parquet_path = export_gold_parquet(
-        academic_performance,
+        dataframe,
         table_name,
     )
 
     print("\n" + "=" * 70)
-    print("GOLD TABLE COMPLETED SUCCESSFULLY")
+    print("GOLD.ACADEMIC_PERFORMANCE COMPLETED SUCCESSFULLY")
     print("=" * 70)
     print(f"PostgreSQL table: {GOLD_SCHEMA}.{table_name}")
     print(f"Parquet export: {parquet_path}")
+
+
+def run_invoice_financial(engine: Engine) -> None:
+    """Build, validate, load and export invoice financial."""
+
+    table_name = "invoice_financial"
+    primary_key = "invoice_id"
+
+    print("\n" + "=" * 70)
+    print("BUILDING GOLD.INVOICE_FINANCIAL")
+    print("=" * 70)
+
+    expected_rows = len(
+        read_silver_table("billing", "invoices")
+    )
+    dataframe = build_invoice_financial()
+
+    print("\n" + "=" * 70)
+    print("VALIDATING GOLD.INVOICE_FINANCIAL DATAFRAME")
+    print("=" * 70)
+
+    validate_invoice_financial(
+        dataframe,
+        expected_rows,
+    )
+
+    print("\n" + "=" * 70)
+    print("LOADING GOLD.INVOICE_FINANCIAL INTO POSTGRESQL")
+    print("=" * 70)
+
+    load_gold_table(
+        dataframe=dataframe,
+        engine=engine,
+        table_name=table_name,
+        primary_key=primary_key,
+    )
+
+    print("\n" + "=" * 70)
+    print("VALIDATING POSTGRESQL TABLE")
+    print("=" * 70)
+
+    validate_loaded_table(
+        engine=engine,
+        table_name=table_name,
+        primary_key=primary_key,
+        expected_rows=expected_rows,
+    )
+
+    parquet_path = export_gold_parquet(
+        dataframe,
+        table_name,
+    )
+
+    print("\n" + "=" * 70)
+    print("GOLD.INVOICE_FINANCIAL COMPLETED SUCCESSFULLY")
+    print("=" * 70)
+    print(f"PostgreSQL table: {GOLD_SCHEMA}.{table_name}")
+    print(f"Parquet export: {parquet_path}")
+
+
+def main() -> None:
+    """Build, validate, load and export all implemented Gold tables."""
+
+    engine = get_postgres_engine()
+
+    run_academic_performance(engine)
+    run_invoice_financial(engine)
+
+    print("\n" + "=" * 70)
+    print("GOLD PIPELINE COMPLETED SUCCESSFULLY")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
