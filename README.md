@@ -17,6 +17,8 @@ The objective is to design and implement an end-to-end data pipeline that ingest
 - Jupyter Notebook
 - Parquet
 
+  Docker Desktop como requisito previo del sistema
+
 ## Project Structure
 
 The project follows a layered data engineering architecture:
