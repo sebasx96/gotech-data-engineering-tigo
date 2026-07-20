@@ -1842,6 +1842,560 @@ def ensure_gold_schema(engine: Engine) -> None:
         )
 
 
+def build_student_360_from_frames(
+    students: pd.DataFrame,
+    customers: pd.DataFrame,
+    academic_performance: pd.DataFrame,
+    invoice_financial: pd.DataFrame,
+    subscription_portfolio: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build one consolidated analytical row per student."""
+
+    student_details = students[
+        [
+            "student_id",
+            "first_name",
+            "last_name",
+            "email",
+            "birth_date",
+            "enrolled_at",
+            "country",
+        ]
+    ].rename(
+        columns={
+            "first_name": "student_first_name",
+            "last_name": "student_last_name",
+            "email": "student_email",
+            "enrolled_at": "student_enrolled_at",
+            "country": "student_country",
+        }
+    )
+
+    customer_details = (
+        customers.loc[
+            customers["external_ref"].notna(),
+            [
+                "customer_id",
+                "external_ref",
+                "first_name",
+                "last_name",
+                "email",
+                "country",
+                "created_at",
+                "segment",
+            ],
+        ]
+        .rename(
+            columns={
+                "external_ref": "student_id",
+                "first_name": "customer_first_name",
+                "last_name": "customer_last_name",
+                "email": "customer_email",
+                "country": "customer_country",
+                "created_at": "customer_created_at",
+                "segment": "customer_segment",
+            }
+        )
+        .copy()
+    )
+
+    academic = academic_performance.copy()
+    academic["is_completed"] = academic[
+        "enrollment_status"
+    ].eq("completed")
+    academic["is_active_enrollment"] = academic[
+        "enrollment_status"
+    ].eq("active")
+    academic["is_failed"] = academic[
+        "enrollment_status"
+    ].eq("failed")
+    academic["is_dropped"] = academic[
+        "enrollment_status"
+    ].eq("dropped")
+    academic["completed_credits"] = academic[
+        "credits"
+    ].where(academic["is_completed"], 0)
+
+    academic_aggregates = (
+        academic.groupby("student_id", as_index=False)
+        .agg(
+            courses_enrolled=("enrollment_id", "count"),
+            courses_completed=("is_completed", "sum"),
+            courses_active=("is_active_enrollment", "sum"),
+            courses_failed=("is_failed", "sum"),
+            courses_dropped=("is_dropped", "sum"),
+            total_credits_enrolled=("credits", "sum"),
+            total_credits_completed=("completed_credits", "sum"),
+            assessment_count=("assessment_count", "sum"),
+            enrollments_with_grades=("has_grades", "sum"),
+            enrollments_with_invalid_weight_sum=(
+                "has_invalid_weight_sum",
+                "sum",
+            ),
+            average_normalized_grade=(
+                "normalized_grade",
+                "mean",
+            ),
+        )
+    )
+
+    student_invoices = invoice_financial.loc[
+        invoice_financial["student_id"].notna()
+    ].copy()
+    student_invoices["is_paid_status"] = student_invoices[
+        "invoice_status"
+    ].eq("paid")
+    student_invoices["is_pending_status"] = student_invoices[
+        "invoice_status"
+    ].eq("pending")
+    student_invoices["is_overdue_status"] = student_invoices[
+        "invoice_status"
+    ].eq("overdue")
+    student_invoices["missing_invoice_items"] = (
+        ~student_invoices["has_invoice_items"]
+    )
+    student_invoices["missing_payments"] = (
+        ~student_invoices["has_payments"]
+    )
+    student_invoices["invoice_item_mismatch"] = (
+        student_invoices["has_invoice_items"]
+        & ~student_invoices["invoice_items_match_header"]
+    )
+    student_invoices["payment_status_mismatch"] = (
+        ~student_invoices["payment_status_matches_balance"]
+    )
+
+    invoice_aggregates = (
+        student_invoices.groupby("student_id", as_index=False)
+        .agg(
+            invoice_count=("invoice_id", "count"),
+            paid_invoice_count=("is_paid_status", "sum"),
+            pending_invoice_count=("is_pending_status", "sum"),
+            overdue_invoice_count=("is_overdue_status", "sum"),
+            outstanding_invoice_count=("is_outstanding", "sum"),
+            overpaid_invoice_count=("is_overpaid", "sum"),
+            invoices_without_items=("missing_invoice_items", "sum"),
+            invoices_without_payments=("missing_payments", "sum"),
+            invoice_item_mismatch_count=(
+                "invoice_item_mismatch",
+                "sum",
+            ),
+            payment_status_mismatch_count=(
+                "payment_status_mismatch",
+                "sum",
+            ),
+            invoice_currency_count=("currency", "nunique"),
+        )
+    )
+
+    student_subscriptions = subscription_portfolio.loc[
+        subscription_portfolio["student_id"].notna()
+    ].copy()
+    student_subscriptions["is_paused"] = (
+        student_subscriptions["subscription_status"]
+        .eq("paused")
+    )
+    student_subscriptions["is_cancelled"] = (
+        student_subscriptions["subscription_status"]
+        .eq("cancelled")
+    )
+
+    subscription_aggregates = (
+        student_subscriptions.groupby(
+            "student_id",
+            as_index=False,
+        )
+        .agg(
+            subscription_count=("subscription_id", "count"),
+            active_subscription_count=("is_active", "sum"),
+            paused_subscription_count=("is_paused", "sum"),
+            cancelled_subscription_count=("is_cancelled", "sum"),
+            invalid_end_date_count=(
+                "invalid_end_date_flag",
+                "sum",
+            ),
+            subscription_product_category_count=(
+                "product_category",
+                "nunique",
+            ),
+            average_subscription_duration_days=(
+                "duration_days",
+                "mean",
+            ),
+        )
+    )
+
+    student_360 = (
+        student_details
+        .merge(
+            customer_details,
+            on="student_id",
+            how="left",
+            validate="one_to_one",
+        )
+        .merge(
+            academic_aggregates,
+            on="student_id",
+            how="left",
+            validate="one_to_one",
+        )
+        .merge(
+            invoice_aggregates,
+            on="student_id",
+            how="left",
+            validate="one_to_one",
+        )
+        .merge(
+            subscription_aggregates,
+            on="student_id",
+            how="left",
+            validate="one_to_one",
+        )
+    )
+
+    count_columns = [
+        "courses_enrolled",
+        "courses_completed",
+        "courses_active",
+        "courses_failed",
+        "courses_dropped",
+        "total_credits_enrolled",
+        "total_credits_completed",
+        "assessment_count",
+        "enrollments_with_grades",
+        "enrollments_with_invalid_weight_sum",
+        "invoice_count",
+        "paid_invoice_count",
+        "pending_invoice_count",
+        "overdue_invoice_count",
+        "outstanding_invoice_count",
+        "overpaid_invoice_count",
+        "invoices_without_items",
+        "invoices_without_payments",
+        "invoice_item_mismatch_count",
+        "payment_status_mismatch_count",
+        "invoice_currency_count",
+        "subscription_count",
+        "active_subscription_count",
+        "paused_subscription_count",
+        "cancelled_subscription_count",
+        "invalid_end_date_count",
+        "subscription_product_category_count",
+    ]
+
+    for column in count_columns:
+        student_360[column] = (
+            student_360[column]
+            .fillna(0)
+            .astype("int64")
+        )
+
+    student_360["average_normalized_grade"] = (
+        student_360["average_normalized_grade"]
+        .round(2)
+    )
+    student_360["average_subscription_duration_days"] = (
+        student_360["average_subscription_duration_days"]
+        .astype("float64")
+        .round(2)
+    )
+
+    student_360["has_academic_activity"] = (
+        student_360["courses_enrolled"] > 0
+    )
+    student_360["has_billing_activity"] = (
+        student_360["invoice_count"] > 0
+    )
+    student_360["has_subscription_history"] = (
+        student_360["subscription_count"] > 0
+    )
+    student_360["has_active_subscription"] = (
+        student_360["active_subscription_count"] > 0
+    )
+    student_360["has_outstanding_invoices"] = (
+        student_360["outstanding_invoice_count"] > 0
+    )
+    student_360["has_overdue_invoices"] = (
+        student_360["overdue_invoice_count"] > 0
+    )
+
+    selected_columns = [
+        "student_id",
+        "customer_id",
+        "student_first_name",
+        "student_last_name",
+        "student_email",
+        "birth_date",
+        "student_enrolled_at",
+        "student_country",
+        "customer_first_name",
+        "customer_last_name",
+        "customer_email",
+        "customer_country",
+        "customer_created_at",
+        "customer_segment",
+        "courses_enrolled",
+        "courses_completed",
+        "courses_active",
+        "courses_failed",
+        "courses_dropped",
+        "total_credits_enrolled",
+        "total_credits_completed",
+        "assessment_count",
+        "enrollments_with_grades",
+        "enrollments_with_invalid_weight_sum",
+        "average_normalized_grade",
+        "has_academic_activity",
+        "invoice_count",
+        "paid_invoice_count",
+        "pending_invoice_count",
+        "overdue_invoice_count",
+        "outstanding_invoice_count",
+        "overpaid_invoice_count",
+        "invoices_without_items",
+        "invoices_without_payments",
+        "invoice_item_mismatch_count",
+        "payment_status_mismatch_count",
+        "invoice_currency_count",
+        "has_billing_activity",
+        "has_outstanding_invoices",
+        "has_overdue_invoices",
+        "subscription_count",
+        "active_subscription_count",
+        "paused_subscription_count",
+        "cancelled_subscription_count",
+        "invalid_end_date_count",
+        "subscription_product_category_count",
+        "average_subscription_duration_days",
+        "has_subscription_history",
+        "has_active_subscription",
+    ]
+
+    return student_360[selected_columns].copy()
+
+
+def build_student_360(
+    silver_root: Path = SILVER_ROOT,
+) -> pd.DataFrame:
+    """Read Silver inputs and build the integrated student 360 table."""
+
+    return build_student_360_from_frames(
+        students=read_silver_table(
+            "university",
+            "students",
+            silver_root,
+        ),
+        customers=read_silver_table(
+            "billing",
+            "customers",
+            silver_root,
+        ),
+        academic_performance=build_academic_performance(
+            silver_root
+        ),
+        invoice_financial=build_invoice_financial(
+            silver_root
+        ),
+        subscription_portfolio=build_subscription_portfolio(
+            silver_root
+        ),
+    )
+
+
+def validate_student_360(
+    dataframe: pd.DataFrame,
+    expected_rows: int,
+    expected_enrollments: int,
+    expected_student_invoices: int,
+    expected_student_subscriptions: int,
+) -> dict[str, int | bool]:
+    """Validate student grain, integrations, metrics and flags."""
+
+    enrollment_status_total = (
+        dataframe["courses_completed"]
+        + dataframe["courses_active"]
+        + dataframe["courses_failed"]
+        + dataframe["courses_dropped"]
+    )
+
+    count_columns = [
+        "courses_enrolled",
+        "courses_completed",
+        "courses_active",
+        "courses_failed",
+        "courses_dropped",
+        "total_credits_enrolled",
+        "total_credits_completed",
+        "assessment_count",
+        "enrollments_with_grades",
+        "enrollments_with_invalid_weight_sum",
+        "invoice_count",
+        "paid_invoice_count",
+        "pending_invoice_count",
+        "overdue_invoice_count",
+        "outstanding_invoice_count",
+        "overpaid_invoice_count",
+        "invoices_without_items",
+        "invoices_without_payments",
+        "invoice_item_mismatch_count",
+        "payment_status_mismatch_count",
+        "invoice_currency_count",
+        "subscription_count",
+        "active_subscription_count",
+        "paused_subscription_count",
+        "cancelled_subscription_count",
+        "invalid_end_date_count",
+        "subscription_product_category_count",
+    ]
+
+    negative_metric_rows = int(
+        dataframe[count_columns].lt(0).any(axis=1).sum()
+    )
+
+    normalized_grade_mask = dataframe[
+        "average_normalized_grade"
+    ].notna()
+
+    results: dict[str, int | bool] = {
+        "actual_rows": len(dataframe),
+        "expected_rows": expected_rows,
+        "null_student_ids": int(
+            dataframe["student_id"].isna().sum()
+        ),
+        "duplicated_student_ids": int(
+            dataframe["student_id"].duplicated().sum()
+        ),
+        "missing_customers": int(
+            dataframe["customer_id"].isna().sum()
+        ),
+        "duplicated_customer_ids": int(
+            dataframe["customer_id"].duplicated().sum()
+        ),
+        "negative_metric_rows": negative_metric_rows,
+        "invalid_enrollment_status_totals": int(
+            dataframe["courses_enrolled"]
+            .ne(enrollment_status_total)
+            .sum()
+        ),
+        "invalid_average_grades": int(
+            (
+                normalized_grade_mask
+                & ~dataframe["average_normalized_grade"]
+                .between(0, 100)
+            ).sum()
+        ),
+        "invalid_academic_flags": int(
+            (
+                dataframe["has_academic_activity"]
+                != dataframe["courses_enrolled"].gt(0)
+            ).sum()
+        ),
+        "invalid_billing_flags": int(
+            (
+                dataframe["has_billing_activity"]
+                != dataframe["invoice_count"].gt(0)
+            ).sum()
+        ),
+        "invalid_subscription_history_flags": int(
+            (
+                dataframe["has_subscription_history"]
+                != dataframe["subscription_count"].gt(0)
+            ).sum()
+        ),
+        "invalid_active_subscription_flags": int(
+            (
+                dataframe["has_active_subscription"]
+                != dataframe["active_subscription_count"].gt(0)
+            ).sum()
+        ),
+        "invalid_outstanding_invoice_flags": int(
+            (
+                dataframe["has_outstanding_invoices"]
+                != dataframe["outstanding_invoice_count"].gt(0)
+            ).sum()
+        ),
+        "invalid_overdue_invoice_flags": int(
+            (
+                dataframe["has_overdue_invoices"]
+                != dataframe["overdue_invoice_count"].gt(0)
+            ).sum()
+        ),
+        "academic_enrollment_total": int(
+            dataframe["courses_enrolled"].sum()
+        ),
+        "expected_enrollments": expected_enrollments,
+        "student_invoice_total": int(
+            dataframe["invoice_count"].sum()
+        ),
+        "expected_student_invoices": expected_student_invoices,
+        "student_subscription_total": int(
+            dataframe["subscription_count"].sum()
+        ),
+        "expected_student_subscriptions": (
+            expected_student_subscriptions
+        ),
+        "students_without_academic_activity": int(
+            (~dataframe["has_academic_activity"]).sum()
+        ),
+        "students_without_billing_activity": int(
+            (~dataframe["has_billing_activity"]).sum()
+        ),
+        "students_without_subscription_history": int(
+            (~dataframe["has_subscription_history"]).sum()
+        ),
+        "students_with_active_subscription": int(
+            dataframe["has_active_subscription"].sum()
+        ),
+        "students_with_outstanding_invoices": int(
+            dataframe["has_outstanding_invoices"].sum()
+        ),
+        "students_with_overdue_invoices": int(
+            dataframe["has_overdue_invoices"].sum()
+        ),
+    }
+
+    results["is_valid"] = all(
+        [
+            results["actual_rows"] == results["expected_rows"],
+            results["null_student_ids"] == 0,
+            results["duplicated_student_ids"] == 0,
+            results["missing_customers"] == 0,
+            results["duplicated_customer_ids"] == 0,
+            results["negative_metric_rows"] == 0,
+            results["invalid_enrollment_status_totals"] == 0,
+            results["invalid_average_grades"] == 0,
+            results["invalid_academic_flags"] == 0,
+            results["invalid_billing_flags"] == 0,
+            results["invalid_subscription_history_flags"] == 0,
+            results["invalid_active_subscription_flags"] == 0,
+            results["invalid_outstanding_invoice_flags"] == 0,
+            results["invalid_overdue_invoice_flags"] == 0,
+            (
+                results["academic_enrollment_total"]
+                == results["expected_enrollments"]
+            ),
+            (
+                results["student_invoice_total"]
+                == results["expected_student_invoices"]
+            ),
+            (
+                results["student_subscription_total"]
+                == results["expected_student_subscriptions"]
+            ),
+        ]
+    )
+
+    for rule_name, value in results.items():
+        print(f"{rule_name}: {value}")
+
+    if not results["is_valid"]:
+        raise ValueError(
+            "Gold student_360 validation failed."
+        )
+
+    return results
+
+
 def load_gold_table(
     dataframe: pd.DataFrame,
     engine: Engine,
@@ -2282,6 +2836,105 @@ def run_crm_lead(engine: Engine) -> None:
     print(f"PostgreSQL table: {GOLD_SCHEMA}.{table_name}")
     print(f"Parquet export: {parquet_path}")
 
+def run_student_360(engine: Engine) -> None:
+    """Build, validate, load and export the student 360 table."""
+
+    table_name = "student_360"
+    primary_key = "student_id"
+
+    print("\n" + "=" * 70)
+    print("BUILDING GOLD.STUDENT_360")
+    print("=" * 70)
+
+    students = read_silver_table(
+        "university",
+        "students",
+    )
+    enrollments = read_silver_table(
+        "university",
+        "enrollments",
+    )
+    invoices = read_silver_table(
+        "billing",
+        "invoices",
+    )
+    subscriptions = read_silver_table(
+        "billing",
+        "subscriptions",
+    )
+    customers = read_silver_table(
+        "billing",
+        "customers",
+    )
+
+    student_customer_ids = customers.loc[
+        customers["external_ref"].notna(),
+        "customer_id",
+    ]
+
+    expected_rows = len(students)
+    expected_enrollments = len(enrollments)
+    expected_student_invoices = int(
+        invoices["customer_id"]
+        .isin(student_customer_ids)
+        .sum()
+    )
+    expected_student_subscriptions = int(
+        subscriptions["customer_id"]
+        .isin(student_customer_ids)
+        .sum()
+    )
+
+    dataframe = build_student_360()
+
+    print("\n" + "=" * 70)
+    print("VALIDATING GOLD.STUDENT_360 DATAFRAME")
+    print("=" * 70)
+
+    validate_student_360(
+        dataframe=dataframe,
+        expected_rows=expected_rows,
+        expected_enrollments=expected_enrollments,
+        expected_student_invoices=expected_student_invoices,
+        expected_student_subscriptions=(
+            expected_student_subscriptions
+        ),
+    )
+
+    print("\n" + "=" * 70)
+    print("LOADING GOLD.STUDENT_360 INTO POSTGRESQL")
+    print("=" * 70)
+
+    load_gold_table(
+        dataframe=dataframe,
+        engine=engine,
+        table_name=table_name,
+        primary_key=primary_key,
+    )
+
+    print("\n" + "=" * 70)
+    print("VALIDATING POSTGRESQL TABLE")
+    print("=" * 70)
+
+    validate_loaded_table(
+        engine=engine,
+        table_name=table_name,
+        primary_key=primary_key,
+        expected_rows=expected_rows,
+    )
+
+    parquet_path = export_gold_parquet(
+        dataframe,
+        table_name,
+    )
+
+    print("\n" + "=" * 70)
+    print("GOLD.STUDENT_360 COMPLETED SUCCESSFULLY")
+    print("=" * 70)
+    print(f"PostgreSQL table: {GOLD_SCHEMA}.{table_name}")
+    print(f"Parquet export: {parquet_path}")
+
+
 def main() -> None:
     """Build, validate, load and export all implemented Gold tables."""
 
@@ -2293,6 +2946,7 @@ def main() -> None:
     run_subscription_portfolio(engine)
     run_crm_opportunity(engine)
     run_crm_lead(engine)
+    run_student_360(engine)
 
     print("\n" + "=" * 70)
     print("GOLD PIPELINE COMPLETED SUCCESSFULLY")
