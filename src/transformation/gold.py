@@ -928,6 +928,267 @@ def validate_product_sales(
 
     return results
 
+
+def build_subscription_portfolio_from_frames(
+    subscriptions: pd.DataFrame,
+    products: pd.DataFrame,
+    customers: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build one analytical row per subscription."""
+
+    product_details = products[
+        [
+            "product_id",
+            "sku",
+            "name",
+            "category",
+            "monthly_price",
+            "active",
+        ]
+    ].rename(
+        columns={
+            "name": "product_name",
+            "category": "product_category",
+            "monthly_price": "product_monthly_price",
+            "active": "product_active",
+        }
+    )
+
+    customer_details = customers[
+        [
+            "customer_id",
+            "external_ref",
+            "segment",
+            "country",
+            "created_at",
+        ]
+    ].rename(
+        columns={
+            "external_ref": "student_id",
+            "segment": "customer_segment",
+            "country": "customer_country",
+            "created_at": "customer_created_at",
+        }
+    )
+
+    subscription_portfolio = (
+        subscriptions
+        .merge(
+            product_details,
+            on="product_id",
+            how="left",
+            validate="many_to_one",
+        )
+        .merge(
+            customer_details,
+            on="customer_id",
+            how="left",
+            validate="many_to_one",
+        )
+        .rename(
+            columns={"status": "subscription_status"}
+        )
+    )
+
+    subscription_portfolio["duration_days"] = (
+        subscription_portfolio["end_date"]
+        - subscription_portfolio["start_date"]
+    ).dt.days.astype("Int64")
+
+    subscription_portfolio["is_active"] = (
+        subscription_portfolio["subscription_status"]
+        .eq("active")
+    )
+    subscription_portfolio["is_student_customer"] = (
+        subscription_portfolio["student_id"].notna()
+    )
+    subscription_portfolio["invalid_end_date_flag"] = (
+        ~subscription_portfolio["end_date_quality_valid"]
+    )
+
+    subscription_portfolio["product_monthly_price"] = (
+        subscription_portfolio["product_monthly_price"]
+        .round(2)
+    )
+
+    selected_columns = [
+        "subscription_id",
+        "customer_id",
+        "student_id",
+        "is_student_customer",
+        "customer_segment",
+        "customer_country",
+        "customer_created_at",
+        "product_id",
+        "sku",
+        "product_name",
+        "product_category",
+        "product_monthly_price",
+        "product_active",
+        "subscription_status",
+        "start_date",
+        "end_date",
+        "duration_days",
+        "is_active",
+        "invalid_end_date_flag",
+    ]
+
+    return subscription_portfolio[selected_columns].copy()
+
+
+def build_subscription_portfolio(
+    silver_root: Path = SILVER_ROOT,
+) -> pd.DataFrame:
+    """Read Silver inputs and build Gold subscription portfolio."""
+
+    return build_subscription_portfolio_from_frames(
+        subscriptions=read_silver_table(
+            "billing", "subscriptions", silver_root
+        ),
+        products=read_silver_table(
+            "billing", "products", silver_root
+        ),
+        customers=read_silver_table(
+            "billing", "customers", silver_root
+        ),
+    )
+
+
+def validate_subscription_portfolio(
+    dataframe: pd.DataFrame,
+    expected_rows: int,
+) -> dict[str, int | float | bool]:
+    """Validate subscription grain, joins, dates and quality flags."""
+
+    expected_active_flag = (
+        dataframe["subscription_status"].eq("active")
+    )
+    expected_student_flag = (
+        dataframe["student_id"].notna()
+    )
+
+    valid_date_mask = (
+        ~dataframe["invalid_end_date_flag"]
+        & dataframe["end_date"].notna()
+    )
+
+    duration_values = dataframe["duration_days"].dropna()
+
+    results: dict[str, int | float | bool] = {
+        "actual_rows": len(dataframe),
+        "expected_rows": expected_rows,
+        "null_subscription_ids": int(
+            dataframe["subscription_id"].isna().sum()
+        ),
+        "duplicated_subscription_ids": int(
+            dataframe["subscription_id"].duplicated().sum()
+        ),
+        "missing_customers": int(
+            dataframe["customer_segment"].isna().sum()
+        ),
+        "missing_products": int(
+            dataframe["sku"].isna().sum()
+        ),
+        "missing_statuses": int(
+            dataframe["subscription_status"].isna().sum()
+        ),
+        "missing_start_dates": int(
+            dataframe["start_date"].isna().sum()
+        ),
+        "negative_monthly_prices": int(
+            dataframe["product_monthly_price"].lt(0).sum()
+        ),
+        "negative_durations": int(
+            dataframe["duration_days"].lt(0).sum()
+        ),
+        "invalid_dates_still_present": int(
+            (
+                dataframe["invalid_end_date_flag"]
+                & dataframe["end_date"].notna()
+            ).sum()
+        ),
+        "invalid_valid_date_orders": int(
+            (
+                valid_date_mask
+                & dataframe["end_date"].lt(
+                    dataframe["start_date"]
+                )
+            ).sum()
+        ),
+        "invalid_active_flags": int(
+            (
+                dataframe["is_active"]
+                != expected_active_flag
+            ).sum()
+        ),
+        "invalid_student_flags": int(
+            (
+                dataframe["is_student_customer"]
+                != expected_student_flag
+            ).sum()
+        ),
+        "active_subscriptions": int(
+            dataframe["is_active"].sum()
+        ),
+        "paused_subscriptions": int(
+            dataframe["subscription_status"].eq("paused").sum()
+        ),
+        "cancelled_subscriptions": int(
+            dataframe["subscription_status"].eq("cancelled").sum()
+        ),
+        "student_subscriptions": int(
+            dataframe["is_student_customer"].sum()
+        ),
+        "non_student_subscriptions": int(
+            (~dataframe["is_student_customer"]).sum()
+        ),
+        "invalid_end_dates": int(
+            dataframe["invalid_end_date_flag"].sum()
+        ),
+        "subscriptions_without_end_date": int(
+            dataframe["end_date"].isna().sum()
+        ),
+        "inactive_product_subscriptions": int(
+            (~dataframe["product_active"]).sum()
+        ),
+        "product_category_count": int(
+            dataframe["product_category"].nunique()
+        ),
+        "average_duration_days": round(
+            float(duration_values.mean()),
+            2,
+        ),
+    }
+
+    results["is_valid"] = all(
+        [
+            results["actual_rows"] == results["expected_rows"],
+            results["null_subscription_ids"] == 0,
+            results["duplicated_subscription_ids"] == 0,
+            results["missing_customers"] == 0,
+            results["missing_products"] == 0,
+            results["missing_statuses"] == 0,
+            results["missing_start_dates"] == 0,
+            results["negative_monthly_prices"] == 0,
+            results["negative_durations"] == 0,
+            results["invalid_dates_still_present"] == 0,
+            results["invalid_valid_date_orders"] == 0,
+            results["invalid_active_flags"] == 0,
+            results["invalid_student_flags"] == 0,
+        ]
+    )
+
+    for rule_name, value in results.items():
+        print(f"{rule_name}: {value}")
+
+    if not results["is_valid"]:
+        raise ValueError(
+            "Gold subscription_portfolio validation failed."
+        )
+
+    return results
+
+
 def ensure_gold_schema(engine: Engine) -> None:
     """Create the Gold schema when it does not already exist."""
 
@@ -1204,6 +1465,65 @@ def run_product_sales(engine: Engine) -> None:
     print(f"PostgreSQL table: {GOLD_SCHEMA}.{table_name}")
     print(f"Parquet export: {parquet_path}")
 
+
+def run_subscription_portfolio(engine: Engine) -> None:
+    """Build, validate, load and export subscription portfolio."""
+
+    table_name = "subscription_portfolio"
+    primary_key = "subscription_id"
+
+    print("\n" + "=" * 70)
+    print("BUILDING GOLD.SUBSCRIPTION_PORTFOLIO")
+    print("=" * 70)
+
+    expected_rows = len(
+        read_silver_table("billing", "subscriptions")
+    )
+    dataframe = build_subscription_portfolio()
+
+    print("\n" + "=" * 70)
+    print("VALIDATING GOLD.SUBSCRIPTION_PORTFOLIO DATAFRAME")
+    print("=" * 70)
+
+    validate_subscription_portfolio(
+        dataframe,
+        expected_rows,
+    )
+
+    print("\n" + "=" * 70)
+    print("LOADING GOLD.SUBSCRIPTION_PORTFOLIO INTO POSTGRESQL")
+    print("=" * 70)
+
+    load_gold_table(
+        dataframe=dataframe,
+        engine=engine,
+        table_name=table_name,
+        primary_key=primary_key,
+    )
+
+    print("\n" + "=" * 70)
+    print("VALIDATING POSTGRESQL TABLE")
+    print("=" * 70)
+
+    validate_loaded_table(
+        engine=engine,
+        table_name=table_name,
+        primary_key=primary_key,
+        expected_rows=expected_rows,
+    )
+
+    parquet_path = export_gold_parquet(
+        dataframe,
+        table_name,
+    )
+
+    print("\n" + "=" * 70)
+    print("GOLD.SUBSCRIPTION_PORTFOLIO COMPLETED SUCCESSFULLY")
+    print("=" * 70)
+    print(f"PostgreSQL table: {GOLD_SCHEMA}.{table_name}")
+    print(f"Parquet export: {parquet_path}")
+
+
 def main() -> None:
     """Build, validate, load and export all implemented Gold tables."""
 
@@ -1212,6 +1532,7 @@ def main() -> None:
     run_academic_performance(engine)
     run_invoice_financial(engine)
     run_product_sales(engine)
+    run_subscription_portfolio(engine)
 
     print("\n" + "=" * 70)
     print("GOLD PIPELINE COMPLETED SUCCESSFULLY")
