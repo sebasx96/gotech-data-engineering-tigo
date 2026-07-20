@@ -1189,6 +1189,410 @@ def validate_subscription_portfolio(
     return results
 
 
+def build_opportunity_activity_aggregates(
+    activities: pd.DataFrame,
+) -> pd.DataFrame:
+    """Aggregate activity metrics by opportunity."""
+
+    opportunity_activities = activities.loc[
+        activities["opportunity_id"].notna()
+    ].copy()
+
+    aggregates = (
+        opportunity_activities
+        .groupby("opportunity_id", as_index=False)
+        .agg(
+            activity_count=("activity_id", "count"),
+            first_activity_at=("occurred_at", "min"),
+            last_activity_at=("occurred_at", "max"),
+        )
+    )
+
+    activity_type_counts = (
+        opportunity_activities
+        .pivot_table(
+            index="opportunity_id",
+            columns="type",
+            values="activity_id",
+            aggfunc="count",
+            fill_value=0,
+        )
+        .reset_index()
+        .rename_axis(columns=None)
+    )
+
+    activity_columns = {
+        "call": "call_activity_count",
+        "demo": "demo_activity_count",
+        "email": "email_activity_count",
+        "meeting": "meeting_activity_count",
+        "note": "note_activity_count",
+    }
+
+    for source_column in activity_columns:
+        if source_column not in activity_type_counts.columns:
+            activity_type_counts[source_column] = 0
+
+    activity_type_counts = activity_type_counts.rename(
+        columns=activity_columns
+    )
+
+    return aggregates.merge(
+        activity_type_counts[
+            [
+                "opportunity_id",
+                "call_activity_count",
+                "demo_activity_count",
+                "email_activity_count",
+                "meeting_activity_count",
+                "note_activity_count",
+            ]
+        ],
+        on="opportunity_id",
+        how="left",
+        validate="one_to_one",
+    )
+
+
+def build_opportunity_contact_aggregates(
+    opportunity_contacts: pd.DataFrame,
+) -> pd.DataFrame:
+    """Aggregate distinct CRM contacts by opportunity."""
+
+    return (
+        opportunity_contacts
+        .groupby("opportunity_id", as_index=False)
+        .agg(
+            contact_count=("contact_id", "nunique"),
+        )
+    )
+
+
+def build_crm_opportunity_from_frames(
+    opportunities: pd.DataFrame,
+    accounts: pd.DataFrame,
+    activities: pd.DataFrame,
+    opportunity_contacts: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build one analytical row per CRM opportunity."""
+
+    account_details = accounts[
+        [
+            "account_id",
+            "name",
+            "industry",
+            "country",
+            "annual_revenue",
+            "employees",
+        ]
+    ].rename(
+        columns={
+            "name": "account_name",
+            "country": "account_country",
+            "annual_revenue": "account_annual_revenue",
+            "employees": "account_employees",
+        }
+    )
+
+    activity_aggregates = build_opportunity_activity_aggregates(
+        activities
+    )
+    contact_aggregates = build_opportunity_contact_aggregates(
+        opportunity_contacts
+    )
+
+    crm_opportunity = (
+        opportunities
+        .rename(columns={"name": "opportunity_name"})
+        .merge(
+            account_details,
+            on="account_id",
+            how="left",
+            validate="many_to_one",
+        )
+        .merge(
+            activity_aggregates,
+            on="opportunity_id",
+            how="left",
+            validate="one_to_one",
+        )
+        .merge(
+            contact_aggregates,
+            on="opportunity_id",
+            how="left",
+            validate="one_to_one",
+        )
+    )
+
+    count_columns = [
+        "activity_count",
+        "call_activity_count",
+        "demo_activity_count",
+        "email_activity_count",
+        "meeting_activity_count",
+        "note_activity_count",
+        "contact_count",
+    ]
+
+    crm_opportunity[count_columns] = (
+        crm_opportunity[count_columns]
+        .fillna(0)
+        .astype("int64")
+    )
+
+    crm_opportunity["amount"] = (
+        crm_opportunity["amount"].round(2)
+    )
+    crm_opportunity["account_annual_revenue"] = (
+        crm_opportunity["account_annual_revenue"].round(2)
+    )
+
+    crm_opportunity["has_activities"] = (
+        crm_opportunity["activity_count"].gt(0)
+    )
+    crm_opportunity["has_contacts"] = (
+        crm_opportunity["contact_count"].gt(0)
+    )
+    crm_opportunity["is_won"] = (
+        crm_opportunity["stage"].eq("won")
+    )
+    crm_opportunity["is_lost"] = (
+        crm_opportunity["stage"].eq("lost")
+    )
+    crm_opportunity["is_closed"] = (
+        crm_opportunity["stage"].isin(["won", "lost"])
+    )
+    crm_opportunity["is_open"] = (
+        ~crm_opportunity["is_closed"]
+    )
+    crm_opportunity["invalid_close_date_flag"] = (
+        ~crm_opportunity["close_date_quality_valid"]
+    )
+
+    selected_columns = [
+        "opportunity_id",
+        "opportunity_name",
+        "account_id",
+        "account_name",
+        "industry",
+        "account_country",
+        "account_annual_revenue",
+        "account_employees",
+        "stage",
+        "amount",
+        "created_at",
+        "close_date",
+        "activity_count",
+        "call_activity_count",
+        "demo_activity_count",
+        "email_activity_count",
+        "meeting_activity_count",
+        "note_activity_count",
+        "first_activity_at",
+        "last_activity_at",
+        "has_activities",
+        "contact_count",
+        "has_contacts",
+        "is_open",
+        "is_closed",
+        "is_won",
+        "is_lost",
+        "invalid_close_date_flag",
+    ]
+
+    return crm_opportunity[selected_columns].copy()
+
+
+def build_crm_opportunity(
+    silver_root: Path = SILVER_ROOT,
+) -> pd.DataFrame:
+    """Read Silver inputs and build Gold CRM opportunities."""
+
+    return build_crm_opportunity_from_frames(
+        opportunities=read_silver_table(
+            "crm", "opportunities", silver_root
+        ),
+        accounts=read_silver_table(
+            "crm", "accounts", silver_root
+        ),
+        activities=read_silver_table(
+            "crm", "activities", silver_root
+        ),
+        opportunity_contacts=read_silver_table(
+            "crm", "opportunity_contacts", silver_root
+        ),
+    )
+
+
+def validate_crm_opportunity(
+    dataframe: pd.DataFrame,
+    expected_rows: int,
+) -> dict[str, int | bool | float]:
+    """Validate CRM-opportunity grain, joins and analytical flags."""
+
+    expected_activity_flag = dataframe["activity_count"].gt(0)
+    expected_contact_flag = dataframe["contact_count"].gt(0)
+    expected_won_flag = dataframe["stage"].eq("won")
+    expected_lost_flag = dataframe["stage"].eq("lost")
+    expected_closed_flag = dataframe["stage"].isin(
+        ["won", "lost"]
+    )
+    expected_open_flag = ~expected_closed_flag
+
+    activity_type_total = dataframe[
+        [
+            "call_activity_count",
+            "demo_activity_count",
+            "email_activity_count",
+            "meeting_activity_count",
+            "note_activity_count",
+        ]
+    ].sum(axis=1)
+
+    results: dict[str, int | bool | float] = {
+        "actual_rows": len(dataframe),
+        "expected_rows": expected_rows,
+        "null_opportunity_ids": int(
+            dataframe["opportunity_id"].isna().sum()
+        ),
+        "duplicated_opportunity_ids": int(
+            dataframe["opportunity_id"].duplicated().sum()
+        ),
+        "missing_accounts": int(
+            dataframe["account_name"].isna().sum()
+        ),
+        "missing_stages": int(
+            dataframe["stage"].isna().sum()
+        ),
+        "negative_amounts": int(
+            dataframe["amount"].lt(0).sum()
+        ),
+        "negative_activity_counts": int(
+            dataframe["activity_count"].lt(0).sum()
+        ),
+        "negative_contact_counts": int(
+            dataframe["contact_count"].lt(0).sum()
+        ),
+        "invalid_activity_type_totals": int(
+            activity_type_total
+            .ne(dataframe["activity_count"])
+            .sum()
+        ),
+        "invalid_activity_flags": int(
+            dataframe["has_activities"]
+            .ne(expected_activity_flag)
+            .sum()
+        ),
+        "invalid_contact_flags": int(
+            dataframe["has_contacts"]
+            .ne(expected_contact_flag)
+            .sum()
+        ),
+        "invalid_won_flags": int(
+            dataframe["is_won"]
+            .ne(expected_won_flag)
+            .sum()
+        ),
+        "invalid_lost_flags": int(
+            dataframe["is_lost"]
+            .ne(expected_lost_flag)
+            .sum()
+        ),
+        "invalid_closed_flags": int(
+            dataframe["is_closed"]
+            .ne(expected_closed_flag)
+            .sum()
+        ),
+        "invalid_open_flags": int(
+            dataframe["is_open"]
+            .ne(expected_open_flag)
+            .sum()
+        ),
+        "contradictory_open_closed_flags": int(
+            (
+                dataframe["is_open"]
+                & dataframe["is_closed"]
+            ).sum()
+        ),
+        "invalid_dates_still_present": int(
+            (
+                dataframe["invalid_close_date_flag"]
+                & dataframe["close_date"].notna()
+            ).sum()
+        ),
+        "invalid_valid_date_orders": int(
+            (
+                ~dataframe["invalid_close_date_flag"]
+                & dataframe["close_date"].notna()
+                & dataframe["close_date"].lt(
+                    dataframe["created_at"]
+                )
+            ).sum()
+        ),
+        "open_opportunities": int(
+            dataframe["is_open"].sum()
+        ),
+        "closed_opportunities": int(
+            dataframe["is_closed"].sum()
+        ),
+        "won_opportunities": int(
+            dataframe["is_won"].sum()
+        ),
+        "lost_opportunities": int(
+            dataframe["is_lost"].sum()
+        ),
+        "opportunities_without_activities": int(
+            (~dataframe["has_activities"]).sum()
+        ),
+        "opportunities_without_contacts": int(
+            (~dataframe["has_contacts"]).sum()
+        ),
+        "invalid_close_dates": int(
+            dataframe["invalid_close_date_flag"].sum()
+        ),
+        "average_activity_count": round(
+            float(dataframe["activity_count"].mean()),
+            2,
+        ),
+        "average_contact_count": round(
+            float(dataframe["contact_count"].mean()),
+            2,
+        ),
+    }
+
+    results["is_valid"] = all(
+        [
+            results["actual_rows"] == results["expected_rows"],
+            results["null_opportunity_ids"] == 0,
+            results["duplicated_opportunity_ids"] == 0,
+            results["missing_accounts"] == 0,
+            results["missing_stages"] == 0,
+            results["negative_amounts"] == 0,
+            results["negative_activity_counts"] == 0,
+            results["negative_contact_counts"] == 0,
+            results["invalid_activity_type_totals"] == 0,
+            results["invalid_activity_flags"] == 0,
+            results["invalid_contact_flags"] == 0,
+            results["invalid_won_flags"] == 0,
+            results["invalid_lost_flags"] == 0,
+            results["invalid_closed_flags"] == 0,
+            results["invalid_open_flags"] == 0,
+            results["contradictory_open_closed_flags"] == 0,
+            results["invalid_dates_still_present"] == 0,
+            results["invalid_valid_date_orders"] == 0,
+        ]
+    )
+
+    for rule_name, value in results.items():
+        print(f"{rule_name}: {value}")
+
+    if not results["is_valid"]:
+        raise ValueError(
+            "Gold crm_opportunity validation failed."
+        )
+
+    return results
+
 def ensure_gold_schema(engine: Engine) -> None:
     """Create the Gold schema when it does not already exist."""
 
@@ -1524,6 +1928,63 @@ def run_subscription_portfolio(engine: Engine) -> None:
     print(f"Parquet export: {parquet_path}")
 
 
+def run_crm_opportunity(engine: Engine) -> None:
+    """Build, validate, load and export CRM opportunities."""
+
+    table_name = "crm_opportunity"
+    primary_key = "opportunity_id"
+
+    print("\n" + "=" * 70)
+    print("BUILDING GOLD.CRM_OPPORTUNITY")
+    print("=" * 70)
+
+    expected_rows = len(
+        read_silver_table("crm", "opportunities")
+    )
+    dataframe = build_crm_opportunity()
+
+    print("\n" + "=" * 70)
+    print("VALIDATING GOLD.CRM_OPPORTUNITY DATAFRAME")
+    print("=" * 70)
+
+    validate_crm_opportunity(
+        dataframe,
+        expected_rows,
+    )
+
+    print("\n" + "=" * 70)
+    print("LOADING GOLD.CRM_OPPORTUNITY INTO POSTGRESQL")
+    print("=" * 70)
+
+    load_gold_table(
+        dataframe=dataframe,
+        engine=engine,
+        table_name=table_name,
+        primary_key=primary_key,
+    )
+
+    print("\n" + "=" * 70)
+    print("VALIDATING POSTGRESQL TABLE")
+    print("=" * 70)
+
+    validate_loaded_table(
+        engine=engine,
+        table_name=table_name,
+        primary_key=primary_key,
+        expected_rows=expected_rows,
+    )
+
+    parquet_path = export_gold_parquet(
+        dataframe,
+        table_name,
+    )
+
+    print("\n" + "=" * 70)
+    print("GOLD.CRM_OPPORTUNITY COMPLETED SUCCESSFULLY")
+    print("=" * 70)
+    print(f"PostgreSQL table: {GOLD_SCHEMA}.{table_name}")
+    print(f"Parquet export: {parquet_path}")
+
 def main() -> None:
     """Build, validate, load and export all implemented Gold tables."""
 
@@ -1533,6 +1994,7 @@ def main() -> None:
     run_invoice_financial(engine)
     run_product_sales(engine)
     run_subscription_portfolio(engine)
+    run_crm_opportunity(engine)
 
     print("\n" + "=" * 70)
     print("GOLD PIPELINE COMPLETED SUCCESSFULLY")
