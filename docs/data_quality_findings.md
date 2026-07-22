@@ -85,26 +85,30 @@ Decisión:
 ### 6.1. Facturas frente a líneas de factura
 
 - **2.502 facturas** no tienen líneas asociadas.
-- **49.999 facturas** presentan una diferencia superior a 0,01 entre `invoices.total` y la suma de `invoice_items.line_total`.
-- Solo **1 factura** reconcilia dentro de la tolerancia de 0,01.
+- **47.497 facturas con líneas** presentan una diferencia superior a 0,01 entre `invoices.total` y la suma de `invoice_items.line_total`.
+- Solo **1 factura con líneas** reconcilia dentro de la tolerancia de 0,01.
+- El indicador combinado `invoice_items_match_header = False` afecta a **49.999 facturas** porque incluye tanto las 2.502 facturas sin líneas como las 47.497 facturas con diferencia.
 
 Decisión analítica:
 
 - Utilizar `invoices.total` como fuente para KPIs de facturación de cabecera.
 - Utilizar `invoice_items.line_total` para análisis de productos y composición de ventas.
 - No reemplazar un importe por otro ni mezclarlos sin indicar la fuente de la métrica.
-- Mostrar esta diferencia como una limitación de calidad del sistema fuente.
+- Mostrar por separado las facturas sin líneas y las facturas con líneas que no reconcilian, evitando doble conteo.
+- Utilizar el indicador de 49.999 únicamente cuando se describa explícitamente como alerta combinada.
 
 ### 6.2. Facturas frente a pagos
 
 - **18.567 facturas** no tienen pagos asociados.
-- **5 facturas** quedan balanceadas dentro de una tolerancia de 0,01.
-- **29.512 facturas** presentan saldo pendiente.
-- **20.483 facturas** presentan pagos superiores al total de cabecera.
+- **8 facturas** quedan balanceadas dentro de una tolerancia de 0,01.
+- **29.510 facturas** presentan saldo pendiente material superior a 0,01.
+- **20.482 facturas** presentan pagos superiores al total de cabecera por más de 0,01.
+- Sin aplicar la tolerancia, **29.515 facturas** tienen un saldo positivo; cinco de ellas tienen exactamente 0,01 y no se consideran materiales. Esta cifra no se utiliza como KPI oficial.
 
 Decisión analítica:
 
 - Calcular facturación y pagos como métricas separadas.
+- Utilizar `is_outstanding = True` como contrato oficial para respetar la tolerancia monetaria de 0,01.
 - Usar el balance únicamente con una advertencia sobre la falta de reconciliación del origen.
 - No inferir automáticamente que un sobrepago sea un error o un crédito sin una regla de negocio explícita.
 

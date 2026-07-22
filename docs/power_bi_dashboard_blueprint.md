@@ -266,9 +266,11 @@ SUM('Fact Invoice'[overpayment_amount])
 Outstanding Invoices =
 CALCULATE(
     COUNTROWS('Fact Invoice'),
-    'Fact Invoice'[outstanding_amount] > 0
+    'Fact Invoice'[is_outstanding] = TRUE()
 )
 ```
+
+`is_outstanding` aplica la tolerancia monetaria de 0,01 definida en Gold. El resultado esperado es 29.510 facturas; contar simplemente `outstanding_amount > 0` produce 29.515 y no corresponde al KPI oficial. La diferencia son cinco saldos de exactamente 0,01.
 
 ### Overdue Invoices
 
@@ -317,9 +319,24 @@ CALCULATE(
 Header Line Mismatches =
 CALCULATE(
     COUNTROWS('Fact Invoice'),
+    'Fact Invoice'[has_invoice_items] = TRUE(),
     'Fact Invoice'[invoice_items_match_header] = FALSE()
 )
 ```
+
+Esta medida cuenta únicamente las 47.497 facturas que tienen líneas pero no reconcilian con la cabecera. Las 2.502 facturas sin líneas se muestran mediante `Invoices Without Items`.
+
+### Invoice Item Quality Alerts
+
+```DAX
+Invoice Item Quality Alerts =
+CALCULATE(
+    COUNTROWS('Fact Invoice'),
+    'Fact Invoice'[invoice_items_match_header] = FALSE()
+)
+```
+
+Este indicador combinado devuelve 49.999 y debe etiquetarse como “facturas sin líneas o con diferencia”, no como diferencias estrictas de cabecera–detalle.
 
 ### Collection Rate
 
@@ -829,6 +846,11 @@ El dashboard debe contar esta historia:
 ---
 
 # 9. Validación final
+
+El estado de la auditoría estructural y las comprobaciones manuales pendientes
+se documenta en [power_bi_validation.md](power_bi_validation.md). Las fórmulas
+de este blueprint constituyen el contrato recomendado para la próxima edición
+manual; el PBIX actual no fue modificado durante este cierre.
 
 Antes de presentar:
 

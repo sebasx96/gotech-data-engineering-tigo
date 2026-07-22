@@ -7,3 +7,5 @@ __pycache__
 .ipynb_checkpoints
 backups
 data
+*.zip
+powerbi/*_backup.pbix

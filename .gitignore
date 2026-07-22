@@ -2,38 +2,53 @@
 __pycache__/
 *.py[cod]
 *.pyo
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
 
 # Virtual environments
 .venv/
 venv/
 env/
 
-# Environment variables
+# Environment variables and secrets
 .env
+.env.*
+!.env.example
 
 # Jupyter
 .ipynb_checkpoints/
 
-# VS Code
+# Editors and operating systems
 .vscode/
-
-# Logs
-*.log
-
-# OS
+.idea/
 .DS_Store
 Thumbs.db
 
-# Python cache
-.pytest_cache/
-
-# Docker
+# Logs and runtime files
+*.log
 *.pid
 
-# Data
-data/raw/
+# Derived data layers
 data/bronze/
 data/silver/
 data/gold/
+data/parquet/
+data/processed/
 
+# Raw data is excluded from the public repository.
+# The final submission ZIP may include it for reproducibility.
+data/raw/
+
+# Local database backups
 backups/*.dump
+
+# Local Power BI backups
+powerbi/*_backup.pbix
+powerbi/*.tmp
+
+# Submission archives
+*.zip

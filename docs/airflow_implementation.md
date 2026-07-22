@@ -371,4 +371,4 @@ Ejecución Gold: exitosa
 Pipeline completo automatizado: completado
 ```
 
-El siguiente paso es analizar las tablas Gold, calcular KPIs, construir visualizaciones y preparar el dashboard de Power BI.
+La capa Gold, el análisis de KPIs y el dashboard de Power BI se encuentran implementados. El DAG utiliza `schedule=None`, por lo que la orquestación se dispara manualmente desde la interfaz o mediante CLI.

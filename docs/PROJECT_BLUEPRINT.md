@@ -1,61 +1,52 @@
-# Project Blueprint
+# Blueprint del proyecto
 
-## Objective
+## Objetivo
 
-Build an end-to-end data engineering pipeline following the requirements defined in the GoTech Data Engineering tigo.
+Construir un pipeline de Ingeniería de Datos reproducible para integrar los dominios University, Billing y CRM, aplicar reglas explícitas de calidad y publicar contratos analíticos para Jupyter y Power BI.
 
----
+## Arquitectura implementada
 
-## Architecture
+```text
+CSV Raw
+   ↓
+Discovery y profiling
+   ↓
+Bronze Parquet
+   ↓
+Silver Parquet
+   ↓
+Gold PostgreSQL + Parquet
+   ↓
+Notebook Gold + Power BI
+```
 
-CSV Files
+Apache Airflow orquesta manualmente las transformaciones Bronze → Silver → Gold dentro del ambiente Docker Compose.
 
-↓
+## Componentes
 
-Bronze Layer
+- Ingesta y perfilado de 18 CSV.
+- Capas Bronze, Silver y Gold.
+- Validaciones bloqueantes y advertencias de calidad.
+- Integración University–Billing mediante `external_ref`.
+- Mart CRM independiente.
+- Persistencia Gold en PostgreSQL.
+- Exportaciones Gold en Parquet.
+- Orquestación con Airflow.
+- Documentación y análisis en Jupyter.
+- Dashboard analítico en Power BI.
 
-↓
+## Estado final
 
-Silver Layer
+```text
+Discovery y profiling: completados
+Bronze: completado
+Silver: completado y validado
+Gold: completado y validado
+PostgreSQL: completado
+Parquet final: completado
+Airflow: completado; ejecución manual
+Notebooks: completados y ejecutados
+Power BI: implementado
+```
 
-↓
-
-Gold Layer
-
-↓
-
-Parquet Export
-
-↓
-
-Notebook Analysis
-
-↓
-
-Business Insights
-
-↓
-
-Executive Presentation
-
----
-
-## Main Components
-
-- Data Ingestion
-- Data Profiling
-- Data Quality
-- Bronze Layer
-- Silver Layer
-- Gold Layer
-- Airflow Orchestration
-- Data Validation
-- Parquet Export
-- Notebook Analysis
-- Business Insights
-
----
-
-## Current Status
-
-Sprint 1 - Environment Setup
+Las mejoras futuras se concentran en pruebas unitarias, CI/CD, programación periódica del DAG y operación sobre infraestructura administrada.

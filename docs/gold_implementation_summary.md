@@ -341,10 +341,4 @@ Exportación Parquet: completada
 Respaldo PostgreSQL: completado
 ```
 
-El siguiente paso es automatizar:
-
-```text
-Bronze → Silver → Gold
-```
-
-mediante Apache Airflow.
+El flujo completo `Bronze → Silver → Gold` está automatizado mediante Apache Airflow. El DAG se dispara manualmente y reconstruye las capas sin duplicar registros.

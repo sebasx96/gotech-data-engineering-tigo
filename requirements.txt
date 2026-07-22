@@ -1,8 +1,8 @@
-pandas
-pyarrow
+pandas==3.0.3
+pyarrow==25.0.0
 psycopg[binary]==3.3.4
 python-dotenv==1.2.2
 SQLAlchemy==2.0.51
-jupyterlab
-ipykernel
-matplotlib
+jupyterlab==4.6.1
+ipykernel==7.3.0
+matplotlib==3.11.1
